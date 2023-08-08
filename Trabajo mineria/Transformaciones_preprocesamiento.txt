@@ -1,0 +1,66 @@
+También hemos aplicado eliminación recursiva de variables. Las variables con las que nos quedamos las marcaremos con *
+
+*1 Aplicamos sign(x)*log(1+|x|)
+*2 Acotamos inferiormente por 0 y log(1+x)
+ 3 Acotamos superiormente por Q3+1.5*IQR, y a los negativos -log(1+|x|)
+ 4 Acotación inferior por 0, log(1+x) e imputación por el máximo
+*5 Imputación kNN y aplicamos sign(x)*log(1+|x|)
+*6 Aplicamos sign(x)*log(1+|x|)
+ 7 Aplicamos sign(x)*log(1+|x|)
+*8 Acotación inferior por 1ºcuartil-1.5*IQR, log(1+x) e imputación kNN
+ 9 Imputación kNN, acotamos inferiormente por 0 y log(1+x)
+ 10 Acotamos superiormente por Q3+1.5*IQR, y a los negativos -log(1+|x|)
+ 11 Aplicamos sign(x)*log(1+|x|)
+ 12 sign(x)*log(1+|x|), e imputación kNN
+*13 Acotación inferior por 0, tanh(x) e imputación por el máximo
+ 14 Aplicamos sign(x)*log(1+|x|)
+ 15 Imputación kNN y aplicamos sign(x)*log(1+|x|)
+ 16 sign(x)*log(1+|x|), e imputación kNN
+ 17 Acotación inferior por 0, log(1+x) e imputación por el máximo
+ 18 Aplicamos sign(x)*log(1+|x|)
+ 19 Acotación inferior por 0, tanh(x) e imputación por el máximo
+ 20 Acotación inferior por 0, log(1+x) e imputación por el máximo
+*21 Invertimos la variable, imputamos por 0 y aplicamos log(1+x)	
+ 22 Aplicamos sign(x)*log(1+|x|)
+ 23 Acotación inferior por 0, tanh(x) e imputación por el máximo
+*24 Acotación a ]-3,3[ e imputación kNN
+*25 Acotamos superiormente por Q3+1.5*IQR, y a los negativos -log(1+|x|)
+*26 sign(x)*log(1+|x|), e imputación kNN
+ 27 sign(x)*log(1+|x|) y luego imputación kNN
+ 28 Acotación inferior por -10, log(1+x) e imputación por kNN
+ 29 Acotamos inferiormente por 0 y log(1+x)	
+ 30 Acotación inferior por 0, tanh(x) e imputación por el máximo
+ 31 Acotación inferior por 0, tanh(x) e imputación por el máximo
+ 32 Acotación [0,1000] e imputación kNN
+ 33 Acotación inferior por 1ºcuartil-1.5*IQR, log(1+x) e imputación kNN
+ 34 Acotación inferior por 1ºcuartil-1.5*IQR, log(1+x) e imputación kNN
+*35 Aplicamos sign(x)*log(1+|x|)
+ 36 Acotamos inferiormente por 0 y log(1+x)
+ 37 Acotamos por el mínimo, luego aplicamos log(x) y finalmente imputamos por el máximo
+ 38 Acotamos superiormente por Q3+1.5*IQR, y a los negativos -log(1+|x|)
+ 39 Acotación inferior por 0, tanh(x) e imputación por el máximo
+*40 Acotación inferior por 0, log(1+x) e imputación por el máximo
+ 41 tanh(x) e imputación kNN
+ 42 Acotación inferior por 0, tanh(x) e imputación por el máximo
+ 43 Acotación inferior por 0, log(1+x) e imputación por el máximo
+ 44 Acotación inferior por 0, log(1+x) e imputación por el máximo
+ 45 Acotación por -10 por debajo y log(1+x) para positivos. Luego imputación kNN
+ 46 Acotación inferior por 0, log(1+x) e imputación por el máximo
+ 47 Acotación [0,250] e imputación kNN
+ 48 Aplicamos sign(x)*log(1+|x|)
+ 49 Acotación inferior por 0, tanh(x) e imputación por el máximo
+ 50 Acotación inferior por 0, log(1+x) e imputación por el máximo
+ 51 Acotamos inferiormente por 0 y log(1+x) 
+ 52 Acotación [0,10] e imputación kNN
+ 53 Acotación inferior por -10, log(1+x) e imputación por kNN
+ 54 Acotación inferior por -10, log(1+x) e imputación por kNN
+ 55 Aplicamos sign(x)*log(1+|x|)
+ 56 Acotación inferior por 0, tanh(x) e imputación por el máximo
+ 57 Aplicamos sign(x)*log(1+|x|)
+ 58 Acotamos inferiormente por 0, log(1+x), imputamos por kNN
+ 59 Aplicamos sign(x)*log(1+|x|)
+ 60 log(1+x) e imputación kNN
+ 61 Imputación kNN, acotamos inferiormente por 0 y log(1+x)
+ 62 Acotación inferior por 0, log(1+x) e imputación por el máximo
+ 63 Acotación inferior por 0, log(1+x) e imputación por el máximo
+ 64 log(1+x) e imputación por el máximo

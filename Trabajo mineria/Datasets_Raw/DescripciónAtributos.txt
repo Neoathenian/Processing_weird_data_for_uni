@@ -1,0 +1,65 @@
+Descripción de cada uno de los atributos
+Attr1 beneficio neto / activo total
+Attr2 pasivo total / activo total
+Attr3 capital circulante / activo total
+Attr4 activo circulante / pasivo a corto plazo
+Attr5 [(tesorería + valores a corto plazo + títulos de crédito - pasivo a corto plazo) / (gastos de explotación - amortizaciones)] * 365 * 365
+Attr6 beneficios no distribuidos / activo total
+Attr7 EBIT / activo total
+Attr8 valor contable de los fondos propios / pasivo total
+Attr9 ventas / activo total
+Attr10 fondos propios / activo total
+Attr11 (beneficio bruto + extraordinarios + gastos financieros) / activo total
+Attr12 beneficio bruto / pasivo a corto plazo
+Attr13 (beneficio bruto + amortizaciones) / ventas
+Attr14 (beneficio bruto + intereses) / activo total
+Attr15 (pasivo total * 365) / (beneficio bruto + amortizaciones)
+Attr16 (beneficio bruto + amortización) / total pasivo
+Attr17 total activo / total pasivo
+Attr18 beneficio bruto / activo total
+Attr19 beneficio bruto / ventas
+Attr20 (existencias * 365) / ventas
+Attr21 ventas (n) / ventas (n-1)
+Attr22 resultado de explotación / activo total
+Attr23 beneficio neto / ventas
+Attr24 beneficio bruto (en 3 años) / activo total
+Attr25 (fondos propios - capital social) / activo total
+Attr26 (beneficio neto + amortizaciones) / total pasivo
+Attr27 resultado de explotación / gastos financieros
+Attr28 capital circulante / inmovilizado
+Attr29 logaritmo del activo total
+Attr30 (pasivo total - tesorería) / ventas
+Attr31 (beneficio bruto + intereses) / ventas
+Attr32 (pasivo corriente * 365) / coste de los productos vendidos
+Attr33 gastos de explotación / pasivo a corto plazo
+Attr34 gastos de explotación / total pasivo
+Attr35 beneficio sobre ventas / activo total
+Attr36 ventas totales / activo total
+Attr37 (activo circulante - existencias) / pasivo a largo plazo
+Attr38 capital constante / activo total
+Attr39 beneficio sobre ventas / ventas
+Attr40 (activo circulante - existencias - deudores) / pasivo a corto plazo
+Attr41 pasivo total / ((resultado de explotación + amortizaciones) * (12/365))
+Attr42 resultado de explotación / ventas
+Attr43 rotación de deudores + rotación de existencias en días
+Attr44 (créditos * 365) / ventas
+Attr45 beneficio neto / existencias
+Attr46 (activo circulante - existencias) / pasivo a corto plazo
+Attr47 (existencias * 365) / coste de los productos vendidos
+Attr48 EBITDA (beneficio de las actividades de explotación - amortizaciones) / activo total
+Attr49 EBITDA (resultado de las actividades de explotación - amortizaciones) / ventas
+Attr50 activo circulante / pasivo total
+Attr51 pasivo a corto plazo / activo total
+Attr52 (pasivo a corto plazo * 365) / coste de los productos vendidos)
+Attr53 fondos propios / inmovilizado
+Attr54 capital constante / inmovilizado
+Attr55 capital circulante
+Attr56 (ventas - coste de los productos vendidos) / ventas
+Attr57 (activo circulante - existencias - pasivo a corto plazo) / (ventas - beneficio bruto - amortizaciones)
+Attr58 costes totales / ventas totales
+Attr59 pasivo a largo plazo / fondos propios
+Attr60 ventas / existencias
+Attr61 ventas / deudores
+Attr62 (pasivo a corto plazo *365) / ventas
+Attr63 ventas / pasivo a corto plazo
+Attr64 ventas / inmovilizado

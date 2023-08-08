@@ -1,0 +1,729 @@
+---
+title: "Modelado"
+author: "Jaime Rafael Barón Yusty"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+
+---
+
+### Este script usa los resultados ya calculados en el script Practica2.Rmd, para que se pueda ejecutar rápidamente y ver los resultados.
+
+```{r}
+#Librerías que vamos a  usar
+library(MLmetrics)
+library(caret)
+library(gbm)
+library(ranger)
+library("tensorflow")
+library(keras)
+library(doParallel)
+library(caret)
+library(DMwR)
+library(hda)
+set.seed(1)
+```
+
+
+
+# Introducción
+A lo largo de este documento miraremos como se comportan distintos modelos sobre nuestra base de datos que ha sido tratada previamente. Empezaremos con la versión que tuvo una pequeña reducción de variables (primero por correlaciones y luego por el algoritmo genético). Después, cuando determinemos cual es el modelo con los mejores resultados, trataremos de usar la base de datos con muchas menos variables (que fue el resultado de rfe), para ver si se puede reducir la complejidad sin perder mucha calidad.
+
+La base de datos que trataremos está muy desbalanceada, pues tiene solo un 5% de 1s (empresas que han entrado en bancarrota tras 1 año). Para solucionar este problema, cuando hagamos cross-validation aplicaremos "SMOTE" para balancear las clases sobre los k-1 folds que se usarán para entrenamiento. Como recordatorio, SMOTE es una técnica que crea datos seleccionando vecinos cercanos de la clase minoritaria (los 1s) y luego hace interpolaciones lineales para crear datos sintéticos.
+
+```{r}
+set.seed(123)
+root.dir="E:/DeMesa/Master_BigData/Mineria_de_datos/Trabajo/"
+df=readRDS(paste0(root.dir,"Datasets_procesados/1_3_RFE_beefy"))
+```
+Antes de aplicar los algoritmos cambiaremos los valores de la variable objetivo 0->Solvente y 1->Bancarrota. Esto lo hacemos porque estaba teniendo problemas de que al aplicarle modelos a nuestra variable decía que los nombres 0,1 para el factor no eran válidos (aunque mi preferencia personal es tener 0/1).
+```{r}
+library(dplyr)
+df$class <- recode(df$class, `0` = 'Solvente', `1` = 'Bancarrota')
+```
+
+Haremos una división train/test y usaremos el conjunto train para la elección de hiperparámetros mediante "grid-searches". Además, aseguraremos que la proporción de las clases (Bancarrota/Solvente) es la misma en el train y en el test
+
+
+```{r}
+train_index <- createDataPartition(df$class, p = 0.8, list = FALSE, times = 1)
+train_df=df[train_index,]
+test_df=df[-train_index,]
+print(paste0("Porcentaje 1s en train: ",round((mean(as.numeric(train_df$class))-1)*100,3),"%"))
+print(paste0("Porcentaje 1s en test:  ",round((mean(as.numeric(test_df$class))-1)*100,3),"%"))
+```
+
+
+
+
+# Búsqueda de hiperparámetros
+A lo largo de esta sección trataremos de encontrar los hiperparámetros óptimos (que optimicen el ROC (área bajo la curva ROC)) para los modelos a estudiar. Para ello, haremos varios grid-searches usando cross-validations de 5 folds. Además, como las clases están desbalanceadas, usaremos SMOTE para equilibrarlas creando datos sintéticos.
+
+
+```{r}
+seeds <- list()
+for (i in 1:5) {
+  seeds[[i]] <- sample.int(1000, 112)
+}
+seeds[[6]] <- sample.int(1000, 1)
+#seeds <- sample.int(1000,6)
+smoteCtrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = twoClassSummary, savePredictions = "final", sampling = "smote",allowParallel=T,seeds=seeds)
+```
+
+
+## Regresión logística
+Empezaremos con un modelo sencillo (nuestro caso base), y por tener parámetros que optimizar usaremos una versión regularizada de la regresión logística. Así, nuestro modelo tiene los siguientes parámetros:
+
+Cost: Es un parámetro que se utiliza para definir el costo asociado con la clasificación incorrecta de un punto de datos. La forma usual de implementar una función de error suele ser $Loss=RSME+\lambda \|\beta\|^2$ (error L2), pero en este paquete se hace a la inversa: $Loss=Cost \cdot RMSE + \|\beta\|^2$.
+
+Loss: Es la función de pérdida a utilizar. Utilizaremos regularización L1 o L2, y también usaremos la opción de regularización L2 pero en su espacio dual (en este paper se detalla mas: https://tminka.github.io/papers/logreg/minka-logreg.pdf). La idea detrás del dual es irse a otro espacio para optimizar para que la forma de optimizar cambie.
+
+
+Epsilon: Es un parámetro que se utiliza para definir la tolerancia para la convergencia del modelo durante el proceso de optimización. Se utiliza para determinar la precisión necesaria que se debe alcanzar en el modelo antes de que se considere que ha convergido.
+
+
+
+```{r}
+set.seed(1)
+#Estos son los hiperparámetros que vamos a considerar para el gbm
+log_grid<- expand.grid(
+  cost=c(0.1,1,10),
+  epsilon=c(0.00001,0.0001,0.001,0.01),
+  loss=c("L1","L2_dual","L2_primal")
+)
+
+
+# Hacemos el grid-search
+log_model <- caret::train(class ~ ., data = train_df, method = "regLogistic", trControl = smoteCtrl, metric = "ROC",verbosity = 0,preproc=c("center","scale"), tuneGrid = log_grid)
+
+print(paste0("Max ROC: ",max(log_model$results$ROC)))
+print(log_model$bestTune)
+```
+
+```{r}
+saveRDS(log_model$results,paste0(root.dir,"Resultados_modelos/Logistic_Regresion_1.Rds"))
+```
+
+
+
+```{r}
+boxplot(ROC~cost,data=log_model$results)
+```
+
+Como se puede ver, el coste tiene una gran importancia, y parece ser mejor cuanto mas pequeño sea. Esto significa que la regularización está tomando un papel muy importante
+
+```{r}
+boxplot(ROC~loss,data=log_model$results)
+```
+
+Podemos ver claramente que el L1 está dominando. Esto significa que estaremos eliminando mas parámetros. 
+
+```{r}
+boxplot(ROC~epsilon,data=log_model$results)
+```
+
+El valor de epsilon no parece tener una gran importancia. Visto esto, haremos un nuevo grid search con $epsilon=10^-4,10^-5$, función de error L1 y costes mas bajos.
+
+
+
+
+```{r}
+set.seed(1)
+log_grid<- expand.grid(
+  cost=c(0.01,0.05,0.1,0.25,0.5,0.75,1,1.25,1.5),
+  epsilon=c(0.00001,0.0001),
+  loss=c("L1")
+)
+
+log_model <- caret::train(class ~ ., data = train_df, method = "regLogistic", trControl = smoteCtrl, metric = "ROC",verbosity = 0,preproc=c("center","scale"), tuneGrid = log_grid)
+
+saveRDS(log_model$results,paste0(root.dir,"Resultados_modelos/Logistic_Regresion_2.Rds"))
+
+print(paste0("Max ROC: ",max(log_model$results$ROC)))
+print(log_model$bestTune)
+```
+
+
+
+```{r}
+boxplot(ROC~cost,data=log_model$results)
+```
+
+Como se puede ver los resultados óptimos están en torno a coste 1
+
+
+```{r}
+boxplot(ROC~epsilon,data=log_model$results)
+```
+
+Como se puede ver, el mejor valor es el de coste 1. Así que nuestro baseline será 0.76 de ROC.
+
+
+## XGBoost
+
+El XGBoost es una variación del GBM (Gradient Boosting Machine), por lo que también es un algoritmo en lo que se hace es crear árboles de forma iterativa , de manera que cada árbol trata de corregir el error generado por el modelo generado por los árboles anteriores. Al igual que en el GBM, como es un modelo basado en decision trees, no necesitamos reescalar los datos. Su principal diferencia es en como hace el entrenamiento, pues además de usar una función de error mas regularizada, es paralelizable (detallado en http://zhanpengfang.github.io/418home.html). El paralelismo no lo hace paralelizando los árboles (pues es obligatoriamente secuencial), sino que se proponen 3 cosas que se pueden paralelizar, siendo la mas importante la última que proponen, la cual consiste en que en cada nivel de la creación de un árbol cada hilo se centro en una variable, y calcule cual sería la división del nodo correspondiente para todos los nodos según esa variable. Esto nos permite un paralelizaje equitativo y con bajo coste.
+
+A continuación seleccionamos los hiperparámetros con los que haremos un búsqueda para encontrar la mejor versión de este modelo.
+
+Los hiperparámetros que tiene este modelo son:
+
+nrounds: número de rondas de boosting; es decir, el número de árboles que usaremos en nuestro modelo. Probaremos varios valores pequeños para empezar (es un parámetro costoso), y en rondas posteriores iremos aumentándolo si nos mejora los resultados.
+
+max_depth: es la máxima profundida de los árboles, también es costoso, por lo que probaremos inicialmente valores pequeños.
+eta/Shrinkage/learning rate es el factor por el que se multiplica cada árbol en cada iteración de aprendizaje, por lo que indica cuanto de rápido aprende del error de todo lo que había hasta ahora.
+
+eta/shrinkage/learning rate: este parámetro controla la velocidad a la que el modelo aprende de los errores. Un valor más bajo de eta significa que el modelo se ajusta lentamente a los datos, lo que puede ayudar a evitar el sobreajuste. Sin embargo, también puede requerir un mayor número de iteraciones de refuerzo para alcanzar el rendimiento óptimo. Probaremos 0.25,0.5,0.75 para probar lo mas uniforme en $]0,1[$.
+
+gamma (Reducción mínima de la pérdida): Este parámetro especifica la cantidad mínima de reducción de pérdida necesaria para hacer una partición adicional en un nodo del árbol. Un valor mayor de gamma significa que se requiere una reducción más significativa de la pérdida para continuar dividiendo el árbol, lo que puede ayudar a evitar el sobreajuste. Por comodidad, este parámetro lo mantendremos fijo en 0 para no tener en cuenta este tipo de efectos (no queremos un grid demasiado grande, ni complicarnos con esto).
+
+colsample_bytree (Ratio de submuestra de columnas): Este parámetro establece la proporción de columnas (características) que se seleccionan aleatoriamente en cada iteración de construcción del árbol. Es común verlo en Random Forests notados como mtry.
+
+min_child_weight (Peso mínimo de la instancia): Este parámetro establece la cantidad mínima de peso que debe tener cada instancia en un nodo del árbol para seguir dividiendo. Un valor mayor de min_child_weight significa que se requiere más peso en cada instancia para continuar dividiendo el árbol, lo que puede ayudar a evitar el sobreajuste. Lo dejaremos en el default, que es 1.
+
+subsample (Porcentaje de submuestra): Este parámetro establece el porcentaje de instancias que se seleccionan aleatoriamente en cada iteración de construcción del árbol. Un valor menor de subsample significa que se selecciona un menor número de instancias, lo que puede ayudar a reducir el sobreajuste. Lo dejaremos de momento en 1 que es el default.
+
+
+```{r}
+set.seed(1)
+xgb_grid<- expand.grid(
+  nrounds = c(20,50,100,200),
+  max_depth = c(1,2,3,4),
+  eta = c(0.25,0.5,0.75),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+# Define the model using random forest and grid search
+xgb_model <- caret::train(class ~ ., data = train_df, method = "xgbTree", trControl = smoteCtrl, metric = "ROC",tuneGrid=xgb_grid,verbosity = 0)
+
+saveRDS(log_model$results,paste0(root.dir,"Resultados_modelos/XGB_1.Rds"))
+
+print(paste0("Max ROC: ",max(xgb_model$results$ROC)))
+print(xgb_model$bestTune)
+```
+
+
+
+```{r}
+boxplot(ROC~nrounds,data=xgb_model$results)
+```
+
+```{r}
+boxplot(ROC~max_depth,data=xgb_model$results)
+```
+
+Como se puede ver, la profundidad es muy importante, y cuanto mayor sea, mayor es el ROC.
+
+```{r}
+boxplot(ROC~eta,data=xgb_model$results)
+```
+
+El learning rate no parece estar teniendo gran efecto.
+
+
+```{r}
+index=which.max(xgb_model$results$ROC)
+xgb_model$results[index,c('eta','max_depth','nrounds')]
+```
+
+
+A continuación probaremos aumentar la profundidad máxima y el número de árboles, dejando igual el eta.
+
+
+```{r}
+set.seed(1)
+xgb_grid<- expand.grid(
+  nrounds = c(200,500,1000,2000),
+  max_depth = c(4,6,8,10),
+  eta = c(0.25,0.5,0.75),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+xgb_model <- caret::train(class ~ ., data = train_df, method = "xgbTree", trControl = smoteCtrl, metric = "ROC",tuneGrid=xgb_grid,verbosity = 0)
+
+saveRDS(log_model$results,paste0(root.dir,"Resultados_modelos/XGB_2.Rds"))
+
+print(paste0("Max ROC: ",max(xgb_model$results$ROC)))
+print(xgb_model$bestTune)
+```
+
+
+```{r}
+boxplot(ROC~nrounds,data=xgb_model$results)
+```
+
+Como podemos ver, cuanto mayor es el número de árboles, mejores resultados da, aunque parece haber llegado a un plateau, por lo que añadir muchos mas árboles no parece ayudar. Parece que en torno a 1000 árboles se ha llegado a un número óptimo de árboles
+
+```{r}
+boxplot(ROC~max_depth,data=xgb_model$results)
+```
+
+La mejor profundidad se puede ver que es claramente 6.
+
+```{r}
+boxplot(ROC~eta,data=xgb_model$results)
+```
+
+Como se puede ver, el learning rate es mejor cuanto mas pequeño es. Esto probablemente es debido a que estamos usando un gran número de árboles y nos interesa que se hagan pocas modificaciones para ir ajustándose cada vez mejor.
+
+
+Haremos una última ronda de parámetros probando muchísimos árboles, learning rates muy bajos y profundidades en torno a 6 y 8, pues 6 es el mejor en general, y 8 es el que tiene el mejor de los modelos.
+
+
+```{r}
+set.seed(1)
+
+xgb_grid<- expand.grid(
+  nrounds = c(1000,2000,5000,10000),
+  max_depth = c(5,6,7,8),
+  eta = c(0.01,0.1,0.25),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+xgb_model <- caret::train(class ~ ., data = train_df, method = "xgbTree", trControl = smoteCtrl, metric = "ROC",tuneGrid=xgb_grid,verbosity = 0)
+
+saveRDS(log_model$results,paste0(root.dir,"Resultados_modelos/XGB_3.Rds"))
+
+print(paste0("Max ROC: ",max(xgb_model$results$ROC)))
+print(xgb_model$bestTune)
+```
+
+
+```{r}
+boxplot(ROC~nrounds,data=xgb_model$results)
+```
+
+Como podemos ver, cuanto mayor es el número de árboles, mejores resultados da, aunque parece haber llegado a un plateau, por lo que añadir muchos mas árboles no parece ayudar. Parece que en torno a 1000 árboles se ha llegado a un número óptimo de árboles
+
+```{r}
+boxplot(ROC~max_depth,data=xgb_model$results)
+```
+
+La mejor profundidad se puede ver que es claramente 6.
+
+```{r}
+boxplot(ROC~eta,data=xgb_model$results)
+```
+
+
+
+
+
+## SVM (kernel polinomial)
+
+A lo largo de esta sección estudiaremos una máquina de soporte vectorial con kernel radial gaussiano (modelo de https://cran.r-project.org/web/packages/kernlab/kernlab.pdf). Esto significa que trataremos de crear hiperplanos para clasificar los puntos después de aplicarles funciones polinómicas para aumentar el número de variables y con suerte separar exitosamente los puntos. Para los SVMs es importante que las variables estén normalizadas (para que las distancias no se distorsionen), por lo que lo añadiremos al preprocesado (junto al SMOTE). 
+
+Los hiperparámetros que estudiaremos en este modelo son:
+
+1) sigma: es el parámetro del kernel radial que describe la anchura del kernel, pues el kernel se expresa de la forma $K(x,x')=\exp(-\frac{\|x-x'\|^2}{2\sigma^2}$.
+
+2) C: es un parámetro que va al contrario de la suavidad, así, parámetros altos lleva a modelos mas complejos. Este parámetro esencialmente es la cantidad de error que estamos dispuestos a aceptar en el modelo que estemos entrenando. Esto se hace modificando la función de error añadiendo un término de holgura multiplicado por C.
+
+3) Weight: es un peso que le pone a las clases, esto en general es para clases desbalanceadas. Se puede ver en el código fuente (https://github.com/topepo/caret/blob/master/models/files/svmRadialWeights.R) que Weight es el peso que se le da a la clase 0, dándole a la clase 1 el peso 1. Por este motivo, pondremos pesos pequeños hasta 1 para ver si se mejora algo
+
+
+
+```{r}
+# Define the tuning grid
+svm_grid <- expand.grid(
+  sigma = c(0.01, 0.1, 1, 10),
+  C = c(0.1, 1, 10, 100),
+  Weight = c(0.02,0.05, 0.1,0.5,0.9,0.95, 1,1.1)
+)
+```
+
+
+
+```{r}
+library(doParallel)
+no.cores<-detectCores()
+cl <- makePSOCKcluster(no.cores)
+registerDoParallel(cl)
+
+set.seed(1)
+
+seeds <- list()
+for (i in 1:5) {
+  seeds[[i]] <- sample.int(1000, dim(svm_grid)[1])
+}
+seeds[[6]] <- sample.int(1000, 1)
+
+NOsmoteCtrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = twoClassSummary, savePredictions = "final",allowParallel=T,seeds=seeds)
+
+# Define the model using random forest and grid search
+  svm_model <- caret::train(class ~ ., data = train_df, method = "svmRadialWeights", trControl = NOsmoteCtrl, metric = "ROC",verbosity = 0,preproc=c("center","scale"),tuneGrid=svm_grid)
+
+saveRDS(svm_model$results,paste0(root.dir,"Resultados_modelos/SVM_1.Rds"))
+
+# Print the cross-validation results
+print(svm_model$bestTune)
+max(svm_model$results$ROC)
+stopCluster(cl)
+```
+
+
+```{r}
+boxplot(ROC~Weight,data=svm_model$results)
+```
+
+Los resultados obtenidos para los pesos son sorprendentes, pues al no haber aplicado SMOTE y por tanto haber mantenido las clases desbalanceadas, esperaba que el peso de 0.05 ganaría (damos menos peso a la clase 0 para compensar su abundancia). Sin embargo, lo que vemos es que gana el peso 1 con un gran margen de sobra. Por esto, los siguientes resultados los veremos solo para peso igual a 1.
+
+```{r}
+boxplot(ROC~sigma,data=svm_model$results[svm_model$results$Weight==1,])
+```
+
+Podemos ver que los mejores valores de sigma son los mas pequeños, lo cual significa que abren mas la distribución.
+
+
+```{r}
+boxplot(ROC~C,data=svm_model$results[svm_model$results$Weight==1,])
+```
+Podemos ver que el parámetro C no parece afectar apenas los resultados.
+
+El mejor resultado que hemos obtenido es de 0.76 y no tiene perspectiva de mejorar mucho, por lo que probaremos con los mismos parámetros pero usando SMOTE.
+
+
+
+```{r}
+# Define the tuning grid
+svm_grid <- expand.grid(
+  sigma = c(0.01, 0.1, 1, 10),
+  C = c(0.1, 1, 10, 100),
+  Weight = c(0.02,0.05, 0.1,0.5,0.9,0.95, 1,1.1)
+)
+```
+
+
+
+```{r}
+library(doParallel)
+no.cores<-detectCores()
+cl <- makePSOCKcluster(no.cores)
+registerDoParallel(cl)
+
+set.seed(1)
+
+seeds <- list()
+for (i in 1:5) {
+  seeds[[i]] <- sample.int(1000, dim(svm_grid)[1])
+}
+seeds[[6]] <- sample.int(1000, 1)
+
+smoteCtrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = twoClassSummary, savePredictions = "final",allowParallel=T,seeds=seeds,sampling = "smote")
+
+# Define the model using random forest and grid search
+  svm_model <- caret::train(class ~ ., data = train_df, method = "svmRadialWeights", trControl = smoteCtrl, metric = "ROC",verbosity = 0,preproc=c("center","scale"),tuneGrid=svm_grid)
+
+saveRDS(svm_modelel$results,paste0(root.dir,"Resultados_modelos/SVM_2.Rds"))
+
+# Print the cross-validation results
+print(svm_model$bestTune)
+max(svm_model$results$ROC)
+stopCluster(cl)
+```
+
+
+```{r}
+boxplot(ROC~Weight,data=svm_model$results)
+```
+
+
+```{r}
+boxplot(ROC~sigma,data=svm_model$results[svm_model$results$Weight==1,])
+```
+
+
+
+```{r}
+boxplot(ROC~C,data=svm_model$results[svm_model$results$Weight==1,])
+```
+
+
+
+```{r}
+boxplot(ROC~sigma,data=svm_model$results[svm_model$results$Weight==1 & svm_model$results$C==0.1,])
+```
+
+Visto esto, está claro que weights lo dejamos en 1, y vamos a seguir con sigma y C con valores mas pequeños.
+
+
+
+```{r}
+# Define the tuning grid
+svm_grid <- expand.grid(
+  sigma = c(0.0001,0.001,0.005,0.01, 0.025),
+  C = c(0.001,0.01,0.05,0.1, 0.25),
+  Weight = c(1)
+)
+```
+
+
+
+```{r}
+library(doParallel)
+no.cores<-detectCores()
+cl <- makePSOCKcluster(no.cores)
+registerDoParallel(cl)
+
+set.seed(1)
+
+seeds <- list()
+for (i in 1:5) {
+  seeds[[i]] <- sample.int(1000, dim(svm_grid)[1])
+}
+seeds[[6]] <- sample.int(1000, 1)
+
+NOsmoteCtrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = twoClassSummary, savePredictions = "final",allowParallel=T,seeds=seeds)
+
+
+svm_model <- caret::train(class ~ ., data = train_df, method = "svmRadialWeights", trControl = smoteCtrl, metric = "ROC",verbosity = 0,preproc=c("center","scale"),tuneGrid=svm_grid)
+
+saveRDS(svm_model$results,paste0(root.dir,"Resultados_modelos/SVM_3.Rds"))
+
+print(svm_model$bestTune)
+max(svm_model$results$ROC,na.rm=T)
+stopCluster(cl)
+```
+
+
+```{r}
+boxplot(ROC~sigma,data=svm_model$results)
+```
+
+```{r}
+boxplot(ROC~C,data=svm_model$results)
+```
+
+
+Como podemos ver, los mejores valores son en torno a los encontrados en el grid-search anterior. Nos quedaremos en este caso con el mejor valor encontrado, que es sigma=0.025,C=0.25, Weight=1.
+
+
+
+### HDA
+
+En este apartado entrenaremos un HDA (Heteroscedastic Discriminant Analysis
+) regularizado que es una generalización del modelo LDA (Linear Discriminant Analysis). Usando el LDA de Fisher que propone maximizar:
+
+
+$$
+J(W)=\frac{|W^t S_b W|}{|W^t S_w W|}
+$$
+donde $S_b$  es la matriz de cuasicovarianza intra-clases, y $S_w$ es la matriz de cuasicovarianza inter-clases. La idea es encontrar una proyección donde se maximize la varianza intra-clases ($|W^t S_b W|$) minimizando la interclases ($|W^t S_w W|$) Así, para clasificar un punto $X$, primero lo proyectamos a nuestro nuevo espacio generado por W; es decir, sus coordenadas son $W^t X$,y miramos de que clase está mas cerca (en este nuevo espacio).
+
+HDA se diferencia de LDA en la función de error usada, pues se modifica a:
+$$
+J(W)=\frac{|W^t S_b W|^n}{\prod_i^C|W^t S_{w,i} W|^{n_i}}
+$$
+donde $n_i$ es el número de filas de la clase i, y $n=\prod_i^C n_i$. Además, HDA propone dos regularizaciones
+
+Un parámetro interesante que usaremos es newdim. Esto es la dimensión a la que queremos reducir nuestro espacio. Así, $W$ tiene dimensiones $n \times newdim$  donde n es el número de variables.
+
+Además de esto, tendremos dos parámetros de regularización (que ayudan a estabilizar el modelo), que son lambda y gamma (detallado en https://www.eurasip.org/Proceedings/Eusipco/Eusipco2009/contents/papers/1569191420.pdf). Lo importante a tener en cuenta es que sus valores están en el intervalo $[0,1]$ (son parámetros que interpolan dos matrices (como si fuera un segmento)).
+
+Al igual que el LDA, es un algoritmo en el que se supone que tenemos datos normales. Aunque nosotros no tengamos este tipo de datos, aplicaremos el método de todas formas para ver que obtenemos.
+```{r}
+# Define the tuning grid
+hda_grid <- expand.grid(
+  gamma = c(0.01, 0.1, 0.5, 1),
+  lambda = c(0, 0.25,0.5,0.75),
+  newdim = c(3,5,10,15)
+)
+```
+
+```{r}
+no.cores<-detectCores()
+cl <- makePSOCKcluster(no.cores)
+registerDoParallel(cl)
+
+
+set.seed(1)
+
+seeds <- list()
+for (i in 1:5) {
+  seeds[[i]] <- sample.int(1000, dim(hda_grid)[1])
+}
+seeds[[6]] <- sample.int(1000, 1)
+
+
+# Define the resampling method with SMOTE only on training data
+smoteCtrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = twoClassSummary, savePredictions = "final", sampling = "smote",allowParallel=T,seeds=seeds)
+
+# Define the model using random forest and grid search
+hda_model <- caret::train(class ~ ., data = train_df, method = "hda",trControl = smoteCtrl, metric = "ROC",verbosity = 0,preproc=c("center","scale"),tuneGrid=hda_grid)
+
+
+saveRDS(hda_model$results,paste0(root.dir,"Resultados_modelos/HDA_1.Rds"))
+
+
+# Print the cross-validation results
+print(hda_model$bestTune)
+max(hda_model$results$ROC,na.rm=T)
+stopCluster(cl)
+```
+
+```{r}
+boxplot(ROC~newdim,data=lda_model$results)
+```
+
+Podemos observar que el newdim óptimo esta en torno a 10.
+
+```{r}
+boxplot(ROC~gamma,data=lda_model$results)
+```
+Parece ser que cuanto mas pequeño mejor para nuestro gamma.
+
+```{r}
+boxplot(ROC~lambda,data=svm_model$results[svm_model$results$newdim!=1,])
+```
+
+
+Como se puede ver, el lambda óptimo parece estar entre 0 y 0.25.
+
+
+
+```{r}
+# Define the tuning grid
+hda_grid <- expand.grid(
+  gamma = c(0, 0.001, 0.01),
+  lambda = c(0,0.01,0.05,0.1,0.25),
+  newdim = c(8,9,10,11,12)
+)
+```
+
+```{r}
+no.cores<-detectCores()
+cl <- makePSOCKcluster(no.cores)
+registerDoParallel(cl)
+set.seed(1)
+
+seeds <- list()
+for (i in 1:5) {
+  seeds[[i]] <- sample.int(1000, dim(hda_grid)[1])
+}
+seeds[[6]] <- sample.int(1000, 1)
+
+# Define the resampling method with SMOTE only on training data
+smoteCtrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = twoClassSummary, savePredictions = "final", sampling = "smote",allowParallel=T,seeds=seeds)
+
+# Define the model using random forest and grid search
+hda_model <- caret::train(class ~ ., data = train_df, method = "hda",trControl = smoteCtrl, metric = "ROC",verbosity = 0,preproc=c("center","scale"),tuneGrid=hda_grid)
+
+
+saveRDS(hda_model$results,paste0(root.dir,"Resultados_modelos/HDA_2.Rds"))
+
+
+# Print the cross-validation results
+print(hda_model$bestTune)
+max(hda_model$results$ROC,na.rm=T)
+stopCluster(cl)
+```
+
+
+
+
+
+```{r}
+boxplot(ROC~newdim,data=hda_model$results)
+```
+
+
+```{r}
+boxplot(ROC~gamma,data=hda_model$results[hda_model$results$newdim==10 | hda_model$results$newdim==11,])
+```
+
+```{r}
+boxplot(ROC~lambda,data=hda_model$results[hda_model$results$newdim==10 | hda_model$results$newdim==11,])
+```
+
+```{r}
+# Define the tuning grid
+hda_grid <- expand.grid(
+  gamma = c(0, 0.00001,0.0001, 0.001, 0.01),
+  lambda = c(0,0.0001,0.001,0.01,0.025,0.05),
+  newdim = c(10,11)
+)
+```
+
+
+```{r}
+no.cores<-detectCores()
+cl <- makePSOCKcluster(no.cores)
+registerDoParallel(cl)
+set.seed(1)
+
+seeds <- list()
+for (i in 1:5) {
+  seeds[[i]] <- sample.int(1000, dim(hda_grid)[1])
+}
+seeds[[6]] <- sample.int(1000, 1)
+
+# Define the resampling method with SMOTE only on training data
+smoteCtrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = twoClassSummary, savePredictions = "final", sampling = "smote",allowParallel=T,seeds=seeds)
+
+# Define the model using random forest and grid search
+hda_model <- caret::train(class ~ ., data = train_df, method = "hda",trControl = smoteCtrl, metric = "ROC",verbosity = 0,preproc=c("center","scale"),tuneGrid=hda_grid)
+
+
+saveRDS(hda_model$results,paste0(root.dir,"Resultados_modelos/HDA_2.Rds"))
+
+
+# Print the cross-validation results
+print(hda_model$bestTune)
+max(hda_model$results$ROC,na.rm=T)
+stopCluster(cl)
+```
+
+
+
+
+
+```{r}
+boxplot(ROC~newdim,data=hda_model$results)
+```
+
+
+```{r}
+boxplot(ROC~gamma,data=hda_model$results[hda_model$results$newdim==10 | hda_model$results$newdim==11,])
+```
+
+```{r}
+boxplot(ROC~lambda,data=hda_model$results[hda_model$results$newdim==10 | hda_model$results$newdim==11,])
+
+```
+
+
+
+## Selección del mejor modelo
+A continuación entrenaremos cada uno de los modelos en todo el dataset de train (tras aplicarle SMOTE), y veremos como se comparan entre sí mirando varias métricas. Tras elegir el mejor modelo, lo entrenaremos de nuevo con el dataset con muchas menos variables para ver si podemos reducir el número de variables sin apenas perder en las distintas métricas.
+
+
+```{r}
+
+xgb_model <- caret::train(class ~ ., data = train_df, method = "xgbTree", trControl = smoteCtrl, metric = "ROC",tuneGrid=xgb_grid,verbosity = 0)
+    
+train(PRONOSTICO~.,data=hepatitisTrain.sel,
+                     method="rpart",
+                     tuneLength=10,
+                     trControl=fit.control.cv.10)
+```
+
+
+
+
+
+
+
+
+
+
+
+

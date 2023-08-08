@@ -1,0 +1,762 @@
+---
+title: "Practica 2"
+output: html_document
+date: "2022-12-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#Librerías que vamos a  usar
+library(MLmetrics)
+library(caret)
+library(gbm)
+library(ranger)
+library("tensorflow")
+library(keras)
+set.seed(1)
+```
+
+```{r}
+df=read.csv("diabetesBRFSS2015.csv")
+train=sample(1:nrow(df),0.8*nrow(df))
+```
+
+Lo primero a destacar de esta base de datos es que no tiene ningún valor perdido, por lo que no será necesario ningún tipo de imputación. Además, nuestra clase objetivo/target (Diabetes_binary) está balanceada. Por tanto la medida planteada(accuracy) es una buena medida.
+
+Como nota a
+
+```{r}
+#Vamos a hacer búsqueda de hiperparámetros dividiendo el set de entrenamiento en 5 folds
+folds=createFolds(train,5)
+```
+
+# GBM
+
+El GBM (Gradient Boosting Machine) es un algoritmo en lo que se hace es crear árboles de forma iterativa , de manera que cada árbol trata de corregir el error generado por el modelo generado por los árboles anteriores. Como es un modelo basado en decision trees, no necesitamos reescalar los datos.
+
+```{r include=FALSE}
+#2.68horas
+t_inic_gbm=Sys.time()
+```
+
+A continuación seleccionamos los hiperparámetros con los que haremos un búsqueda para encontrar la mejor versión de este modelo.
+
+La elección de parámetros elegida es
+
+1)  n.trees (número de árboles) en los centenares, para tener un número decente de árboles, pero no demasiado grande para que mi ordenador pueda computarlo medianamente rápido.
+
+2)  interacion.depth (profundidad de árboles) la hemos cogida pequeña para evitar overfitting, y también por cuestiones de tiempo.
+
+3)  shrinkage (learning rate) la hemos cogido en estos valores, aunque si tuviera tiempo para mas, me gustaría probar valores mas pequeños (posiblemente aumentando a su vez n.trees)
+
+```{r}
+#Estos son los hiperparámetros que vamos a considerar para el gbm
+gbm_grid=expand.grid(shrinkage=c(0.1,0.2,0.3),interaction.depth=c(1,2,3),n.trees = c(50, 100, 200))
+```
+
+A continuación hagamos un cross-validation de 5 folds en el training set para ver cual es la mejor combinación de estos parámetros, en función del accuracy. En el modelo gbm ponemos como distribución la bernouilli, para que así el output sea una probabilidad. De esta manera, nuestro output será un número en $[0,1]$. Como nuestro objetivo es elegir el modelo en función del accuracy, necesitamos que nuestro modelo nos de como output 0 o 1, por lo que hemos de decidir el threshold de antemano. En este caso tomaremos como threshold 0.5, para que así vaya a la clase con mayor probabilidad.
+
+```{r}
+#Para la ronda i-ésima de hiperparámetros de gbm_grid creamos 1 modelo para 
+#Cada uno de los folds
+Acc_modelo_gbm=function(i,grid,folds){
+  acc=c()
+  for(j in seq(1,length(folds)))
+  {
+    test_round=train[folds[[j]]]
+    train_round=c()
+    for(k in seq(1,5)[-j])
+      {train_round=c(train_round,train[folds[[k]]])}
+    boost=gbm(Diabetes_binary ~ ., data = df[train_round, ],
+                      distribution = "bernoulli",n.trees=grid[i,]$n.trees,
+                 interaction.depth=grid[i,]$interaction.depth,
+                 shrinkage=grid[i,]$shrinkage,n.cores=3
+                 )
+    yhat.boost <- predict(boost , 
+                        newdata = df[test_round, ], n.trees=gbm_grid[i,]$n.trees,
+                        type="response")
+    
+    #Clasificamos poniendo thresholds en 0.5
+    yhat.boost=ifelse(yhat.boost>0.5,1,0)
+    acc=c(acc,Accuracy(yhat.boost,df[test_round,"Diabetes_binary"]))
+  }
+  return(acc)
+}
+
+```
+
+```{r}
+#Recorramos la grid, creando 5 modelos(los folds) y calculando sus accuracies
+#De estos obtenemos la media y la desviación típica
+Resultados_gbm=NULL
+accs_df_gbm=data.frame(acc=c(),mod=c())
+nombres=c()
+for(i in seq(1,nrow(gbm_grid)))
+{
+  nombres=c(nombres,paste0(gbm_grid$n.trees[i],",",gbm_grid$interaction.depth[i],",",gbm_grid$shrinkage[i]))
+  accs=Acc_modelo_gbm(i,gbm_grid,folds)
+  accs_df_gbm=rbind(accs_df_gbm,data.frame(acc=accs,mod=i))
+  Resultados_gbm$acc_media=c(Resultados_gbm$acc_media,mean(accs))
+  Resultados_gbm$acc_sd=c(Resultados_gbm$acc_sd,sd(accs))
+}
+accs_df_gbm$mod=as.factor(accs_df_gbm$mod)
+```
+
+Hasta ahora, hemos calculado un total de 3x3x3=27 modelos. Para elegir elegir el mejor modelo haremos uso del 1 standard-error rule, mirando así el modelo con menor media, y mirando así todos los modelos a una desviación típica de esta media. Mostramos a continuación un boxplot de los 27 modelos coloreando de verde aquellos verificando el 1 standard-error rule, colocando esta cota inferior con una línea discontinua horizontal, y notando el mejor modelo en azul. Además los modelos vienen ordenados de menor a mayor según el número de árboles, luego por la profundidad de los árboles y finalmente por el shrinkage. Así, cuanto mas a la derecha esté el modelo, podemos considerarlo "menos complejo". De los modelos elegidos (en verde) cogeremos el modelo que consideremos menos complejo; es decir, a priori cogeremos el primero por la izquierda que sea verde pudiendo optar por algún otro verde.
+
+Nota: Sería mejor visualmente mostrar en vez de un boxplot, para cada set de hiperparámetros un punto, con las barras de error siendo del tamaño de la desviación estándar. Hemos optado en este caso por un boxplot, porque la información que muestra es similar, pero el código es mas sencillo.
+
+```{r}
+index=which.max(Resultados_gbm$acc_media)#Tomamos el índice del que mayor acc tenga
+acc_1sd=Resultados_gbm$acc_media[index]-Resultados_gbm$acc_sd[index]
+
+myColors <- ifelse(Resultados_gbm$acc_media==Resultados_gbm$acc_media[index],rgb(0,0,1,1),ifelse(Resultados_gbm$acc_media>=acc_1sd , rgb(0,1,0,1) , rgb(1,0,0,1)))
+boxplot(acc~mod,data=accs_df_gbm,col=myColors,ylab = "Accuracy",xlab = "",names=F)
+text(seq(1,length(nombres)),rep(0.731,9), labels = nombres,srt = 60,xpd=NA)
+abline(h=acc_1sd,lty=2)
+```
+
+Podemos ver que los valores obtenidos para el accuracy para nuestros modelos son muy similares, estando de hecho todos salvo uno coloreado de verde (a 1 standard error del mejor). Parece haber una tendencia a mejores Resultados_gbm para mayores valores de número de árboles; sin embargo, como no queda claro mirando el boxplot anterior, hagamos gráficas agrupando por los valores de hiperparámetros.
+
+```{r}
+#library(dplyr)
+res_df=data.frame(Resultados_gbm$acc_media,Resultados_gbm$acc_sd,gbm_grid)
+boxplot(Resultados_gbm.acc_media~n.trees,data=res_df,ylab = "Accuracy")
+boxplot(Resultados_gbm.acc_media~interaction.depth,data=res_df,ylab = "Accuracy")
+boxplot(Resultados_gbm.acc_media~shrinkage,data=res_df,ylab = "Accuracy")
+
+```
+
+En estas gráficas, podemos ver que tal como sospechábamos, el accuracy crece con el número de árboles. Además, podemos ver que el interaction depth es mejor que sea 2 o 3, pues el 1 tiene mucha mayor dispersión teniendo el outlier mas bajo con diferencia. Respecto al shrinkage, notamos que el valor de 0.1 nos da mucha mayor dispersión, pero sus valores no son muy alejados del resto.
+
+Gracias a este análisis, vamos a realizar de nuevo una búsqueda usando un mayor número de árboles, para ello quería mantener la misma variabilidad. Así, pasaremos de buscar en el rango 50-200 de árboles, a 300-1000 árboles.
+
+```{r}
+gbm_grid=rbind(gbm_grid,expand.grid(shrinkage=c(0.1,0.2,0.3),interaction.depth=c(1,2,3),n.trees = seq(300, 1000, 100)))
+```
+
+```{r}
+#Recorramos la grid, creando 5 modelos(los folds) y calculando sus accuracies
+#De estos obtenemos la media y la desviación típica
+#Añadimos el índice asociado a cada uno de los modelos
+levels(accs_df_gbm$mod)=seq(1,nrow(gbm_grid))
+for(i in seq(28,nrow(gbm_grid)))#Empezamos en la row 28!!!(para no repetir modelos)
+{
+  nombres=c(nombres,paste0(gbm_grid$n.trees[i],",",gbm_grid$interaction.depth[i],",",gbm_grid$shrinkage[i]))
+  accs=Acc_modelo_gbm(i,gbm_grid,folds)
+  accs_df_gbm=rbind(accs_df_gbm,data.frame(acc=accs,mod=i))
+  Resultados_gbm$acc_media=c(Resultados_gbm$acc_media,mean(accs))
+  Resultados_gbm$acc_sd=c(Resultados_gbm$acc_sd,sd(accs))
+}
+accs_df_gbm$mod=as.factor(accs_df_gbm$mod)
+```
+
+Actualicemos el boxplot anterior usando todos los resultados obtenidos hasta ahora:
+
+```{r}
+index=which.max(Resultados_gbm$acc_media)#Tomamos el índice del que mayor acc tenga
+acc_1sd=Resultados_gbm$acc_media[index]-Resultados_gbm$acc_sd[index]
+
+myColors <- ifelse(Resultados_gbm$acc_media==Resultados_gbm$acc_media[index],rgb(0,0,1,1),ifelse(Resultados_gbm$acc_media>=acc_1sd , rgb(0,1,0,1) , rgb(1,0,0,1)))
+plot(acc~mod,data=accs_df_gbm,col=myColors,ylab = "Accuracy",xlab = "Complexity",names=F)
+#text(seq(1,length(nombres)),rep(0.731,9), labels = nombres,srt = 60,xpd=NA)
+abline(h=acc_1sd,lty=2)
+abline(v=27.5,lty=2)
+```
+
+Como se puede ver, todos los modelos entrenados están en verde; es decir, están dentro del 1 standard error rule. Por este motivo, es claro que acabaremos eligiendo un modelo con un número de árboles pequeño (probablemente 50).
+
+```{r}
+#library(dplyr)
+res_df=data.frame(Resultados_gbm$acc_media,Resultados_gbm$acc_sd,gbm_grid)
+boxplot(Resultados_gbm.acc_media~n.trees,data=res_df,ylab = "Accuracy")
+boxplot(Resultados_gbm.acc_media~interaction.depth,data=res_df,ylab = "Accuracy")
+boxplot(Resultados_gbm.acc_media~shrinkage,data=res_df,ylab = "Accuracy")
+
+```
+
+Mirando los boxplots por hiperparámetro, parece que el modelo mas sencillo que entra dentro del 1-standard error rule parece ser (n.trees=50,interaciont.depth=2,shrinkage=0.1); sin embargo, cogeremos el que es realmente mas sencillo (y verde) siguiendo el orden n.trees, interaction.depth y finalmente shrinkage. Para elegir más fácilmente, mostraremos un boxplot con los de n.trees=50.
+
+```{r}
+index=which.max(Resultados_gbm$acc_media)#Tomamos el índice del que mayor acc tenga
+acc_1sd=Resultados_gbm$acc_media[index]-Resultados_gbm$acc_sd[index]
+
+myColors <- ifelse(Resultados_gbm$acc_media==Resultados_gbm$acc_media[index],rgb(0,0,1,1),ifelse(Resultados_gbm$acc_media>=acc_1sd , rgb(0,1,0,1) , rgb(1,0,0,1)))
+df_ploteo=accs_df_gbm[1:45,]#Los 9 primeros(x5modelos)
+df_ploteo$mod=droplevels(df_ploteo$mod)
+plot(acc~mod,data=df_ploteo,col=myColors[1:9],ylab = "Accuracy",xlab = "Complexity",names=F)
+text(seq(1,9),rep(0.7325,9), labels = nombres[1:9],srt = 45,xpd=NA)
+abline(h=acc_1sd,lty=2)
+abline(v=27.5,lty=2)
+```
+
+Siguiendo el criterio anterior, nos decantaremos por n.trees=50,max.depth=1 y shrinkage=0.3, que corresponde al índice 3 en nuestro grid. Nótese que hemos elegido el menor valor para n.trees de los hiperparámetros escogidos para nuestro grid, por lo que podríamos haber jugado para disminuir este valor, y aumentar el shrinkage, obteniendo así un modelo mas sencillo. Esto no lo haremos, por el tiempo que tarda en entrenar.
+
+Finalmente entrenemos nuestro modelo, donde como podemos comprobar, su accuracy no varía mucho del cross-validation al train/test, variando $~0.0032$, que entra dentro de la desviación estándar calculada en el cross-validation ($~0.0047$).
+
+```{r}
+indice_mejor_modelo_gbm=3#modelo elegido
+#Entrenamos el modelo y lo evaluamos
+boost=gbm(Diabetes_binary ~ ., data = df[train, ],
+                      distribution = "bernoulli",n.trees=gbm_grid[indice_mejor_modelo_gbm,]$n.trees,interaction.depth
+=gbm_grid[indice_mejor_modelo_gbm,]$interaction.depth,shrinkage=gbm_grid[indice_mejor_modelo_gbm,]$shrinkage)
+
+yhat.boost <- predict(boost ,newdata = df[-train, ],gbm_grid[indice_mejor_modelo_gbm,]$n.trees,type="response")
+    
+#Clasificamos poniendo thresholds en 0.5
+yhat.boost=ifelse(yhat.boost>0.5,1,0)
+acc_gbm=Accuracy(yhat.boost,df[-train,"Diabetes_binary"])
+```
+
+```{r include=FALSE}
+t_fin_gbm=Sys.time()
+```
+
+# Random Forest
+
+El Random Forest es un modelo que consiste en generar árboles donde cada árbol usa un conjunto de n predictores distintos, que debería ser menor que el total de predictores (sino es bagging de árboles). Debido a que es un problema de clasificación, lo normal es hacer que tras entrenar todos estos árboles (que se puede hacer en paralelo), se eliga por votación la clase a predecir de la fila en cuestión. Sin embargo, por despiste mío, en nuestro caso lo que haremos será un Random Forest que haga la media de las predicciones de estos árboles (que serán 0s o 1s) y entonces luego usando un threshold de 0.5, clasifiquemos en 0 o 1. Nótese que ambos métodos dan el mismo resultado (aunque a la hora de entrenar puede que entrenen distinto porque miden el error de forma distinta).
+
+Al igual que en gbm, al ser un modelo basado en árboles, no es necesario reescalar los datos.
+
+```{r include=FALSE}
+#Dura unos 35 min
+t_inic_rf=Sys.time()
+```
+
+Debido a lo que me tarda en carga el gbm, pondremos una nueva semilla para random forest, para que así cuando corramos todo el script desde 0 tengamos el mismo resultado que cuando estoy creando esta parte del script.
+
+```{r}
+set.seed(2)
+```
+
+Para el Random Forest haremos el mismo procedimiento que en GBM, solo que con diferentes parámetros, los cuales son en este caso:
+
+1)  El número de árboles (num.trees), que al igual que en el otro empezaremos con un número pequeño de árboles, pero en el segundo intento de búsqueda de hiperparámetros lo aumentaremos considerablemente y con menos repercusiones que en gbm, pues se entrenan en paralelo.
+
+2)  El número de variables que usará cada árbol (mtry). El standard es $\sqrt{n_{variables}}$, que en este caso sería $\sqrt{22}\simeq 4.69$, que tomamos como 5. Por este motivo, tomaremos valores en torno a 5. Como por restricción de tiempo de cómputo hemos decidio tomar solo 3 para la primera criba, tomaremos 2,4 y 6.
+
+3)  El último hiperparámetro que modificaremos será la profundidad máxima de cada árbol (max.depth), que al igual que en gbm tomaremos como un valor pequeño.
+
+```{r}
+#Estos son los hiperparámetros que vamos a considerar para el gbm
+rf_grid=expand.grid(mtry=c(2,4,6),max.depth=c(1,2,3),num.trees = c(50, 100, 200))
+```
+
+```{r}
+#Para la ronda i-ésima de hiperparámetros de gbm_grid creamos 1 modelo para 
+#Cada uno de los folds
+Acc_modelo_rf=function(i,grid,folds){
+  acc=c()
+  for(j in seq(1,length(folds)))
+  {
+    test_round=train[folds[[j]]]
+    train_round=c()
+    for(k in seq(1,5)[-j])
+      {train_round=c(train_round,train[folds[[k]]])}
+    rf=ranger(Diabetes_binary ~ ., data = df[train_round, ],
+       num.trees = grid[i,]$num.trees,mtry = grid[i,]$mtry,max.depth = grid[i,]$max.depth)
+    yhat.boost <- predict(rf, df[test_round, ],type="response")
+    #Clasificamos poniendo thresholds en 0.5
+    yhat.boost=ifelse(yhat.boost$predictions>0.5,1,0)
+    acc=c(acc,Accuracy(yhat.boost,df[test_round,"Diabetes_binary"]))
+  }
+  return(acc)
+}
+```
+
+```{r}
+#Recorramos la grid, creando 5 modelos(los folds) y calculando sus accuracies
+#De estos obtenemos la media y la desviación típica
+Resultados_rf=NULL
+accs_df_rf=data.frame(acc=c(),mod=c())
+nombres=c()
+for(i in seq(1,nrow(rf_grid)))
+{
+  nombres=c(nombres,paste0(rf_grid$num.trees[i],",",rf_grid$max.depth[i],",",rf_grid$mtry [i]))
+  accs=Acc_modelo_rf(i,rf_grid,folds)
+  accs_df_rf=rbind(accs_df_rf,data.frame(acc=accs,mod=i))
+  Resultados_rf$acc_media=c(Resultados_rf$acc_media,mean(accs))
+  Resultados_rf$acc_sd=c(Resultados_rf$acc_sd,sd(accs))
+}
+accs_df_rf$mod=as.factor(accs_df_rf$mod)
+```
+
+Ploteando los resultados en un boxplot como los usados en gbm tenemos:
+
+```{r}
+index=which.max(Resultados_rf$acc_media)#Tomamos el índice del que mayor acc tenga
+acc_1sd=Resultados_rf$acc_media[index]-Resultados_rf$acc_sd[index]
+
+myColors <- ifelse(Resultados_rf$acc_media==Resultados_rf$acc_media[index],rgb(0,0,1,1),ifelse(Resultados_rf$acc_media>=acc_1sd , rgb(0,1,0,1) , rgb(1,0,0,1)))
+boxplot(acc~mod,data=accs_df_rf,col=myColors,ylab = "Accuracy",xlab = "Parameters",names=F)
+text(seq(1,length(nombres)),rep(0.685,9), labels = nombres,srt = 70,xpd=NA)
+abline(h=acc_1sd,lty=2)
+```
+
+Mirando este boxplot, vemos en verde (50,100,200),3,(2,4,6); es decir, que un parámetro clave parece ser que la profundidad sea 3. Para obtener una visualización mas clara, haremos como en el gbm y mostraremos un boxplot respecto a cada uno de los parámetros.
+
+```{r}
+res_df=data.frame(Resultados_rf$acc_media,Resultados_rf$acc_sd,rf_grid)
+boxplot(Resultados_rf.acc_media~num.trees,data=res_df,ylab = "Accuracy")
+boxplot(Resultados_rf.acc_media~max.depth,data=res_df,ylab = "Accuracy")
+boxplot(Resultados_rf.acc_media~mtry,data=res_df,ylab = "Accuracy")
+```
+
+Tal y como esperábamos, el valor accuracy mas alto se obtiene cuando ponemos la máxima profundidad de los árboles a 3. Los accuracy parecen ser muy similares para mtry=2,4, y ya menor para mtry=6. Por tanto, la idea de usar valores menores al default se sostiene (menores a 5). Finalmente, cabe destacar que parece haber una tendencia creciente con el número de árboles, aunque parece ralentizarse entre 100 y 200.
+
+Visto esto, aprovechando que computacionalmente mucho menos intenso estudiaremos que sucede para un número mucho mayor de árboles, la máxima de profundidad la centraremos en 3, y para el número de variables usaremos los valores inferiores al default (2,3,4, y 5).
+
+```{r}
+rf_grid=rbind(rf_grid,expand.grid(mtry=c(2,3,4,5),max.depth=c(2,3,4),num.trees = c(250,400,550,700,850,1000)))
+```
+
+```{r}
+#Recorramos la grid, creando 5 modelos(los folds) y calculando sus accuracies
+#De estos obtenemos la media y la desviación típica
+levels(accs_df_rf$mod)=seq(1,nrow(rf_grid))
+for(i in seq(28,nrow(rf_grid)))
+{
+  nombres=c(nombres,paste0(rf_grid$num.trees[i],",",rf_grid$max.depth[i],",",rf_grid$mtry [i]))
+  accs=Acc_modelo_rf(i,rf_grid,folds)
+  accs_df_rf=rbind(accs_df_rf,data.frame(acc=accs,mod=i))
+  Resultados_rf$acc_media=c(Resultados_rf$acc_media,mean(accs))
+  Resultados_rf$acc_sd=c(Resultados_rf$acc_sd,sd(accs))
+}
+accs_df_rf$mod=as.factor(accs_df_rf$mod)
+```
+
+ Como ahora hemos aumentando el grid en 4x3x6=72 hiperparámetros, mostrar los nuevos resultados con un boxplot resulta inviable. Por ello, para darnos una idea intiuitiva de los resultados veremos directamente como se comporta el modelo respecto a cada uno de los hiperparámetros. En
+
+```{r}
+res_df=data.frame(Resultados_rf$acc_media,Resultados_rf$acc_sd,rf_grid)
+boxplot(Resultados_rf.acc_media~num.trees,data=res_df[-seq(1,27),],ylab = "Accuracy")
+boxplot(Resultados_rf.acc_media~max.depth,data=res_df[-seq(1,27),],ylab = "Accuracy")
+boxplot(Resultados_rf.acc_media~mtry,data=res_df[-seq(1,27),],ylab = "Accuracy")
+```
+
+Mirando la gráfica anterior que contiene solo los nuevos resultados vemos varias cosas:
+
+1)  Aumentar el número de árboles no parece haber producido ningún cambio, pues todos los valores de accuracy están en torno al mismo valor.
+
+2)  Los resultados obtenidos usando la máxima profundidad han aumentado al pasar de 3-\>4.
+
+3)  El mejor valor para el número de variables parece ser 3.
+
+Mirando cuantos de los mejores resultados tienen un valor de accuracy por encima de 1 standard error por debajo del máximo, vemos que hay 61. Por este motivo, para facilitar la visualización, mostraremos los 10 mejores en un boxplot.
+
+```{r}
+index=which.max(Resultados_rf$acc_media)#Tomamos el índice del que mayor acc tenga
+acc_1sd=Resultados_rf$acc_media[index]-Resultados_rf$acc_sd[index]
+sum(Resultados_rf$acc_media>=acc_1sd)
+```
+
+```{r}
+indices_mod=order(Resultados_rf$acc_media,decreasing =T)[1:10]
+#Tenemos el nombre de los modelos, pero ahora necesitamos transformarlos
+#en índices del cross-validation
+indices=c(5*(indices_mod-1)+1,5*(indices_mod-1)+2,5*(indices_mod-1)+3,5*(indices_mod-1)+4,5*(indices_mod-1)+5)
+plotdf=accs_df_rf[indices,]
+plotdf$mod=droplevels(plotdf$mod)
+plotdf$mod=factor(plotdf$mod,levels=indices_mod)
+boxplot(acc~mod,data=plotdf,ylab = "Accuracy",xlab = "",names=F)
+#Sanity check the que realmente está decreciendo el accuracy de izq a der
+#lines(x=seq(1,10),y=Resultados_rf$acc_media[indices_mod],col="red",type="l")
+text(seq(1,10),rep(0.7315,9), labels = nombres[indices_mod],srt = 70,xpd=NA)
+abline(h=acc_1sd,lty=2)
+```
+
+No es sorprendente que en el top10 domina max.depth=4 y mtry=3; lo que si me resultó sorprendente es ver el mejor valor en este caso es num.trees=400, y luego 1000,700, 800... Sin embargo, que el que tiene un gran número de árboles sea el de mayor accuracy no entra en contradicción con lo expuesto anteriormente, pues si miramos el boxplot, los 10 resultados parecen tener una distribución similar.
+
+Antes de decidir los hiperparámetros que usaremos para nuestro Random Forest, haremos una última criba donde probaremos varios valores para el max.depth y mantendremos el número de árboles bajo.
+
+Originalmente deje esto funcionar hasta max.depth 20, pensando que seguro dejaría de mejorar en torno 6/7, y me encontré una gráfica de 1-20 creciente. El random forest es difícil que haga overfitting, pero si que deja de mejorar llegado a cierto punto. Por eso, a continuación mostraremos los resultados de la variación de la profundidad de 5 en 5 hasta 50.
+
+```{r}
+rf_grid=rbind(rf_grid,expand.grid(mtry=c(2,3,4),max.depth=c(5,6,7,8,9,10,15,20),num.trees = c(100,150,200,250)))
+```
+
+```{r}
+#Recorramos la grid, creando 5 modelos(los folds) y calculando sus accuracies
+#De estos obtenemos la media y la desviación típica
+levels(accs_df_rf$mod)=seq(1,nrow(rf_grid))
+for(i in seq(100,nrow(rf_grid)))
+{
+  nombres=c(nombres,paste0(rf_grid$num.trees[i],",",rf_grid$max.depth[i],",",rf_grid$mtry [i]))
+  accs=Acc_modelo_rf(i,rf_grid,folds)
+  accs_df_rf=rbind(accs_df_rf,data.frame(acc=accs,mod=i))
+  Resultados_rf$acc_media=c(Resultados_rf$acc_media,mean(accs))
+  Resultados_rf$acc_sd=c(Resultados_rf$acc_sd,sd(accs))
+}
+accs_df_rf$mod=as.factor(accs_df_rf$mod)
+```
+
+Veamos el comportamiento respecto a los hiperparámetros de esta nueva criba:
+
+```{r}
+res_df=data.frame(Resultados_rf$acc_media,Resultados_rf$acc_sd,rf_grid)
+boxplot(Resultados_rf.acc_media~num.trees,data=res_df[-seq(1,99),],ylab = "Accuracy")
+boxplot(Resultados_rf.acc_media~max.depth,data=res_df[-seq(1,99),],ylab = "Accuracy")
+boxplot(Resultados_rf.acc_media~mtry,data=res_df[-seq(1,99),],ylab = "Accuracy")
+```
+
+Como se puede ver, la mejor profundidad está entre los valores $\{10,11,12,13,14,15\}$. Sin embargo, no haremos otra criba, y por tanto, nos limitaremos a elegir el mejor modelo de entre los ya calculados. Como detalle interesante a destacar, se puede ver que con depth=20 empieza a haber overfitting, pues se ve el accuracy decrece, a pesar de estar aumentando la "flexibilidad" del modelo.
+
+Mirando cuantos hay verificando el criterio 1 standard-error rule, vemos que hay 57. Para poder elegir el modelo que usaremos, miraremos entre los top 10 mejores en accuracy y eligiremos entre ellos el menos complejo. Representémoslos en el siguiente boxplot:
+
+```{r}
+index=which.max(Resultados_rf$acc_media)#Tomamos el índice del que mayor acc tenga
+acc_1sd=Resultados_rf$acc_media[index]-Resultados_rf$acc_sd[index]
+sum(Resultados_rf$acc_media>=acc_1sd)
+```
+
+```{r}
+indices_mod=order(Resultados_rf$acc_media,decreasing =T)[1:10]
+#Tenemos el nombre de los modelos, pero ahora necesitamos transformarlos
+#en índices del cross-validation
+indices=c(5*(indices_mod-1)+1,5*(indices_mod-1)+2,5*(indices_mod-1)+3,5*(indices_mod-1)+4,5*(indices_mod-1)+5)
+plotdf=accs_df_rf[indices,]
+plotdf$mod=droplevels(plotdf$mod)
+plotdf$mod=factor(plotdf$mod,levels=indices_mod)
+boxplot(acc~mod,data=plotdf,ylab = "Accuracy",xlab = "",names=F)
+#Sanity check the que realmente está decreciendo el accuracy de izq a der
+#lines(x=seq(1,10),y=Resultados_rf$acc_media[indices_mod],col="red",type="l")
+text(seq(1,10),rep(0.740,10), labels = nombres[indices_mod],srt = 70,xpd=NA)
+abline(h=acc_1sd,lty=2)
+```
+
+Mirando el boxplot anterior, tenemos que el mas sencillo de los mostrados es el décimo modelo, que tiene: n.trees=100, depth=10 y mtry=4 (índice=117). Los valores que tiene son perfectamente aceptables, siendo la profundidad grande pero no demasiado, y el número de árboles un número normal, siendo además el mtry el default.
+
+Con esto, ya podemos entrenar nuestro modelo, donde como podemos comprobar, su accuracy no varía mucho del cross-validation al train/test ($~0.0045$), que entra justo dentro de su error estandar ($~0.0052$).
+
+```{r}
+indice_mejor_modelo_rf=117
+#Entrenamos el modelo y lo evaluamos
+rf=ranger(Diabetes_binary ~ ., data = df[train, ],
+       num.trees = rf_grid[indice_mejor_modelo_rf,]$num.trees,mtry = rf_grid[indice_mejor_modelo_rf,]$mtry,max.depth= rf_grid[indice_mejor_modelo_rf,]$max.depth)
+
+yhat.boost <- predict(rf, df[-train, ],type="response")
+#Clasificamos poniendo thresholds en 0.5
+yhat.boost=ifelse(yhat.boost$predictions>0.5,1,0)
+acc_rf=Accuracy(yhat.boost,df[-train,"Diabetes_binary"])
+```
+
+```{r include=FALSE}
+t_fin_rf=Sys.time()
+```
+
+# Red Neuronal
+
+```{r}
+set.seed(3)
+```
+
+```{r include=FALSE}
+t_inic_nn=Sys.time()
+```
+
+El tercer y último modelo que estudiaremos será una red neuronal, y a diferencia de los otros dos, tiene como requisito que reescalemos las variables que usaremos como input. Las redes neuronales son modelos que están formados por capas de neuronas que están conectadas entre sí. El motivo por el que es necesario reescalar los datos es que estaremos sumando y multiplicando valores, por lo que para que los coeficientes de las neuronas sean comparables, es importante que estén reescalados.
+
+```{r}
+x <- model.matrix(Diabetes_binary ~ . -1, data = df) %>% scale()
+y=df$Diabetes_binary
+```
+
+A lo largo de esta sección probaremos con una red neuronal con un dos capas ocultas, teniendo en medio una capa dropout. Los hiperparámetros que modificaremos son:
+
+1)  El número de neuronas en la primera capa oculta.
+
+2)  El dropout rate.
+
+3)  El número de neuronas en la segunda capa oculta.
+
+Como nota adicional, usaremos en ambas capas la función de activación ReLU, mientras que la capa final (1 sola neurona), usará de función activación la Sigmoide, para así representar probabilidades.
+
+Como función de error, usaremos el binary_crossentropy, cuya evolución podremos ver a la vez que la métrica que usaremos para ver si el modelo es bueno; es decir, el accuracy, al igual que en gbm y rf.
+
+Mirando en la documentación, el threshold que usa por defecto cuando muestra el accuracy en el entrenamiento es 0.5 (<https://tensorflow.rstudio.com/reference/keras/metric_binary_accuracy.html#usage>). Para seguir el mismo estilo que en gbm y random forest, no modificaremos el threshold para las redes neuronales; es decir, lo mantendremos en 0.5.
+
+El batch size lo hemos puesto de 3000, para que haga unos 15 batches, pues entre 4 folds hay unas 45000 filas.
+
+Como nota final, usaremos de "Root Mean Square Propagation" como método de descenso del gradiente (gradiente descent :)).
+
+```{r}
+#Estos son los hiperparámetros que vamos a considerar para el gbm
+nn_grid=expand.grid(drop=c(0.1,0.2,0.5,0.7,0.9),N2=c(5,10, 15),N1 = c(5,10, 15))
+```
+
+```{r}
+#Para la ronda i-ésima de hiperparámetros de gbm_grid creamos 1 modelo para 
+#Cada uno de los folds
+Acc_modelo_nn=function(i,grid,folds){
+  acc=c()
+  for(j in seq(1,length(folds)))
+  {
+    test_round=train[folds[[j]]]
+    train_round=c()
+    for(k in seq(1,5)[-j])
+    {train_round=c(train_round,train[folds[[k]]])}
+    
+    modnn <- keras_model_sequential() %>%
+      layer_dense(units = grid$N1[i],activation ="relu",input_shape = ncol(x)) %>%
+      layer_dropout(rate = grid$drop[i]) %>% 
+      layer_dense(units = grid$N2[i],activation="relu") %>%
+      layer_dense(units = 1,activation="sigmoid")
+    modnn %>% compile(loss = "binary_crossentropy",
+                   optimizer = "rmsprop",
+                      metrics = c('accuracy'))
+    history <- modnn %>% fit(x[train_round, ], 
+                          y[train_round], 
+                          epochs = 50, 
+                          batch_size = 3000, 
+                      #validation_data = list(x[test_round,],y[test_round]),
+                      verbose=0,use_mutiprocessing = True)
+    out=predict(modnn,x = x[test_round,],verbose=0)
+    ##Clasificamos poniendo thresholds en 0.5
+    out=ifelse(out>0.5,1,0)
+    acc=c(acc,Accuracy(out,df[test_round,"Diabetes_binary"]))
+  }
+  return(acc)
+}
+
+```
+
+```{r}
+#Recorramos la grid, creando 5 modelos(los folds) y calculando sus accuracies
+#De estos obtenemos la media y la desviación típica
+Resultados_nn=NULL
+accs_df_nn=data.frame(acc=c(),mod=c())
+nombres=c()
+for(i in seq(1,nrow(nn_grid)))
+{
+  nombres=c(nombres,paste0(nn_grid$N1[i],",",nn_grid$drop[i],",",nn_grid$N2[i]))
+  accs=Acc_modelo_nn(i,nn_grid,folds)
+  accs_df_nn=rbind(accs_df_nn,data.frame(acc=accs,mod=i))
+  Resultados_nn$acc_media=c(Resultados_nn$acc_media,mean(accs))
+  Resultados_nn$acc_sd=c(Resultados_nn$acc_sd,sd(accs))
+  #Creamos un score para saber cuales son mas complejos para elegir en un futuro
+  #Resultados$complexity_score=c(Resultados$complexity_score,
+            #CALCULO COMPLEXITY SCORE)
+}
+accs_df_nn$mod=as.factor(accs_df_nn$mod)
+```
+
+Representemos los resultados en un boxplot tal y como hicimos en random forest y gbm:
+
+```{r}
+index=which.max(Resultados_nn$acc_media)#Tomamos el índice del que mayor acc tenga
+acc_1sd=Resultados_nn$acc_media[index]-Resultados_nn$acc_sd[index]
+
+myColors <- ifelse(Resultados_nn$acc_media==Resultados_nn$acc_media[index],rgb(0,0,1,1),ifelse(Resultados_nn$acc_media>=acc_1sd , rgb(0,1,0,1) , rgb(1,0,0,1)))
+boxplot(acc~mod,data=accs_df_nn,col=myColors,ylab = "Accuracy",xlab = "Parameters",names=F,ylim=c(0.64,0.76))
+#text(seq(1,length(nombres)),rep(0.66,9), labels = nombres,srt = 90,xpd=NA)
+abline(h=acc_1sd,lty=2)
+```
+
+Mirando el boxplot, los verdes parecen agruparse en grupos de 3. Esto significa que habrá algún parámetro cuyo mejor valor sea uno en particular. Sin embargo, al mirar los parámetros mas detenidamente, los verdes son de dropout 0.1-0.5 y los rojos son los de dropout 0.7-0.9. En resumen, que poner un dropout demasiado grande destroza la red (nada sorprendente). Veamos como se comporta respecto a cada uno de los hiperparámetros para poder decidir los valores de nuestra siguiente criba.
+
+```{r include=FALSE}
+t_fin_nn=Sys.time()
+print(t_fin_nn-t_inic_nn)
+```
+
+```{r}
+res_nn=data.frame(Resultados_nn$acc_media,Resultados_nn$acc_sd,nn_grid)
+boxplot(Resultados_nn.acc_media~N1,data=res_nn,ylab = "Accuracy")
+boxplot(Resultados_nn.acc_media~drop,data=res_nn,ylab = "Accuracy")
+boxplot(Resultados_nn.acc_media~N2,data=res_nn,ylab = "Accuracy")
+```
+
+Se puede ver claramente lo que mencionamos antes; es decir, que los dropout 0.7 y 0.9 tienen un accuracy menor. Por otro lado, el número de neuronas de la segunda capa no parece tener gran influencia. Parece que el número de neuronas en la primera capa si puede tener influencia. A continuación aumentemos este número para que así usar el dropout tenga sentido
+
+```{r}
+t_inic_nn=Sys.time()
+```
+
+```{r}
+nn_grid=rbind(nn_grid,expand.grid(drop=c(0.1,0.2,0.3,0.5),N2=c(5,10, 15),N1 = c(10, 15,20,25)))
+```
+
+```{r}
+levels(accs_df_nn$mod)=seq(1,nrow(nn_grid))
+for(i in seq(46,nrow(nn_grid)))
+{
+  nombres=c(nombres,paste0(nn_grid$N1[i],",",nn_grid$drop[i],",",nn_grid$N2[i]))
+  accs=Acc_modelo_nn(i,nn_grid,folds)
+  accs_df_nn=rbind(accs_df_nn,data.frame(acc=accs,mod=i))
+  Resultados_nn$acc_media=c(Resultados_nn$acc_media,mean(accs))
+  Resultados_nn$acc_sd=c(Resultados_nn$acc_sd,sd(accs))
+  #Creamos un score para saber cuales son mas complejos para elegir en un futuro
+  #Resultados$complexity_score=c(Resultados$complexity_score,
+            #CALCULO COMPLEXITY SCORE)
+}
+accs_df_nn$mod=as.factor(accs_df_nn$mod)
+```
+
+Veamos ahora los resultados respecto a cada uno de los hiperparámetros:
+
+```{r}
+res_nn=data.frame(Resultados_nn$acc_media,Resultados_nn$acc_sd,nn_grid)
+boxplot(Resultados_nn.acc_media~N1,data=res_nn[-seq(1,45),],ylab = "Accuracy")
+boxplot(Resultados_nn.acc_media~drop,data=res_nn[-seq(1,45),],ylab = "Accuracy")
+boxplot(Resultados_nn.acc_media~N2,data=res_nn[-seq(1,45),],ylab = "Accuracy")
+```
+
+Podemos ver que para la primera capa parece que está llegando a su máximo valor en número de neuronas, pudiendo ser incluso los primeros momentos de overfitting (para 25). Respecto al dropout vemos una tendencia decreciente, por lo que el mejor valor en este caso es 0.1 (realmente tenemos muy pocas neuronas para que haga un buen efecto el dropout. Finalmente, al igual que antes, no parece tener gran influencia el número de neuronas en la 2º capa.
+
+Como uno de mis intereses al elegir esta arquitectura es ver la capa de dropout, a continuación usaremos mas neuronas en la primera capa, llegando hasta 100 (que ya el siguiente me va a tardar 3.4h) para ver si aumentando el número de neuronas resulta mejor el de 100 neuronas+dropout\>0.1, o tenemos simplemente que 5 neuronas+dropout=0.1 es el mejor.
+
+```{r}
+t_fin_nn=Sys.time()
+```
+
+```{r}
+nn_grid=rbind(nn_grid,expand.grid(drop=c(0.1,0.2,0.3,0.5),N2=c(5,10, 15,20,30),N1 = c(30,40,50,75,100)))
+```
+
+```{r}
+levels(accs_df_nn$mod)=seq(1,nrow(nn_grid))
+for(i in seq(94,nrow(nn_grid)))
+{
+  nombres=c(nombres,paste0(nn_grid$N1[i],",",nn_grid$drop[i],",",nn_grid$N2[i]))
+  accs=Acc_modelo_nn(i,nn_grid,folds)
+  accs_df_nn=rbind(accs_df_nn,data.frame(acc=accs,mod=i))
+  Resultados_nn$acc_media=c(Resultados_nn$acc_media,mean(accs))
+  Resultados_nn$acc_sd=c(Resultados_nn$acc_sd,sd(accs))
+  #Creamos un score para saber cuales son mas complejos para elegir en un futuro
+  #Resultados$complexity_score=c(Resultados$complexity_score,
+            #CALCULO COMPLEXITY SCORE)
+}
+accs_df_nn$mod=as.factor(accs_df_nn$mod)
+```
+
+Mostremos como se comporta respecto a cada uno de los hiperparámetros:
+
+```{r}
+res_nn=data.frame(Resultados_nn$acc_media,Resultados_nn$acc_sd,nn_grid)
+boxplot(Resultados_nn.acc_media~N1,data=res_nn[-seq(1,93),],ylab = "Accuracy")
+boxplot(Resultados_nn.acc_media~drop,data=res_nn[-seq(1,93),],ylab = "Accuracy")
+boxplot(Resultados_nn.acc_media~N2,data=res_nn[-seq(1,93 ),],ylab = "Accuracy")
+```
+
+La primera observación es que aumentar el número de neuronas en la segunda capa sigue sin variar el accuracy.
+
+El segundo detalle interesante es que al contrario que antes, el accuracy está mejorando con el drop 0.1-\>0.3, en vez de bajar como en la ronda anterior. Esto puede ser debido al aumento del número de neuronas en la 1º capa, siendo así mas útil el dropout. Finalmente, cabe destacar que no parece haber gran influencia del número de neuronas en la 1º capa. Parece ser que 100 neuronas siguen siendo demasiado pocas para que haga overfitting con esta base de datos.
+
+A continuación mostraremos un boxplot con todos las combinaciones de hiperparámetros de esta red neuronal probadas hasta ahora. En esta gráfica se ve claramente que prácticamente todos los modelos realizados hasta ahora entran dentro del 1-standard error rule; y por tanto, nos podemos quedar con un modelo que sea sencillo. Para saber cual indagaremos un poco mas en los resultados, pero sin duda será uno con unas 15 neuronas ocultas en total (siendo 10 el mínimo que hemos probado).
+
+```{r}
+index=which.max(Resultados_nn$acc_media)#Tomamos el índice del que mayor acc tenga
+acc_1sd=Resultados_nn$acc_media[index]-Resultados_nn$acc_sd[index]
+
+myColors <- ifelse(Resultados_nn$acc_media==Resultados_nn$acc_media[index],rgb(0,0,1,1),ifelse(Resultados_nn$acc_media>=acc_1sd , rgb(0,1,0,1) , rgb(1,0,0,1)))
+boxplot(acc~mod,data=accs_df_nn,col=myColors,ylab = "Accuracy",xlab = "Parameters",names=F,ylim=c(0.74,0.76))
+#text(seq(1,length(nombres)),rep(0.66,9), labels = nombres,srt = 90,xpd=NA)
+abline(h=acc_1sd,lty=2)
+```
+
+```{r}
+indices=ifelse(Resultados_nn$acc_media>=acc_1sd,T,F)
+#print(nombres[indices])
+```
+
+Tal y como sospechábamos, tenemos que una red neuronal con 5 neuronas en la primera capa, 0.1 de dropout, y 10 en la segunda capa entra dentro del 1 standard-error rule, siendo este por tanto el modelo con el que nos quedaremos (índice 6). Es evidente que este dropout es muy pequeño para el número de neuronas (5), por lo que lo eliminaremos, y comprobaremos que también está dentro del 1 standard-error rule:
+
+```{r}
+acc=c()
+for(j in seq(1,length(folds)))
+  {
+    test_round=train[folds[[j]]]
+    train_round=c()
+    for(k in seq(1,5)[-j])
+    {train_round=c(train_round,train[folds[[k]]])}
+    
+    modnn <- keras_model_sequential() %>%
+      layer_dense(units = 5,activation ="relu",input_shape = ncol(x)) %>%
+      layer_dense(units = 10,activation="relu") %>%
+      layer_dense(units = 1,activation="sigmoid")
+    modnn %>% compile(loss = "binary_crossentropy",
+                   optimizer = "rmsprop",
+                      metrics = c('accuracy'))
+    history <- modnn %>% fit(x[train_round, ], 
+                          y[train_round], 
+                          epochs = 50, 
+                          batch_size = 3000, 
+                      #validation_data = list(x[test_round,],y[test_round]),
+                      verbose=0,use_mutiprocessing = True)
+    out=predict(modnn,x = x[test_round,],verbose=0)
+    ##Clasificamos poniendo thresholds en 0.5
+    out=ifelse(out>0.5,1,0)
+    acc=c(acc,Accuracy(out,df[test_round,"Diabetes_binary"]))
+  }
+print(mean(acc))
+```
+
+No es para nada sorprendente que el accuracy no haya variado apenas, mantienéndose en el rango del 1 standard error rule. Por tanto, al final lo que haremos será eliminar la capa dropout. Se podría empezar a hacer otra búsqueda de hiperparámetros para esta nueva arquitectura; sin embargo, nos limitaremos a elegir input+5neuronas+10neuronas+output para no alargar el entrenamiento otras cuantas horas.
+
+```{r}
+modnn <- keras_model_sequential() %>%
+  layer_dense(units = 5,activation ="relu",input_shape = ncol(x)) %>%
+  layer_dense(units = 10,activation="relu") %>%
+  layer_dense(units = 1,activation="sigmoid")
+modnn %>% compile(loss = "binary_crossentropy",
+                   optimizer = "rmsprop",
+                      metrics = c('accuracy'))
+history <- modnn %>% fit(x[train, ], 
+                          y[train], 
+                          epochs = 50, 
+                          batch_size = 3000, 
+                      validation_data = list(x[-train,],y[-train]),
+                      use_mutiprocessing = True,verbose=0)
+out=predict(modnn,x = x[-train,],verbose=0)
+##Clasificamos poniendo thresholds en 0.5
+out=ifelse(out>0.5,1,0)
+acc_nn=Accuracy(out,df[-train,"Diabetes_binary"])
+```
+
+Miremos brevemente los resultados de entrenamiento para comprobar de que no hay overfitting, aunque eso es algo evidente, pues tenemos muy pocas neuronas:
+
+```{r}
+plot(history)
+```
+
+# Elección modelo
+
+Ya tenemos un candidato para cada modelo:
+
+1)  GBM: 50 árboles de profundidad=1 usando un shrinkage de 0.3.
+
+2)  Random Forest: 100 árboles con profundidad=10 eligiendo en cada árbol 4 variables.
+
+3)  Red neuronal: input+5neuronas+dropout=0.1+10neuronas+output.
+
+Es interesante notar que los modelos elegidos son todos modelos con parámetros tirando a lo sencillo. Esto podemos interpretarlo como que añadir complejidad a estos modelos con esta base de datos no ha resultado en un aprendizaje mas profundo. Antes de comprobar los resultados, quiero reiterar que la media del target es $0.496\simeq0.5$, por lo que las clases están balanceadas y por tanto el accuracy es una buena medida.
+
+Mostremos los accuracy de los modelos:
+
+```{r}
+print(paste0("GBM: ",acc_gbm))
+print(paste0("RF: ",acc_rf))
+print(paste0("NN: ",acc_nn))
+```
+
+Debido a que entre el mejor y peor modelo de los mostrados en el train/test es solo de $\sim0.001$ de accuracy, podríamos elegir cualquiera. Los dos basados en árboles serían buenos debido a que tenemos herramientas extra para su explicabilidad. Sin embargo, debido a que tenemos tan solo 21 variables, prefiero optar por la red neuronal, que es el que mayor accuracy tiene; y si preguntan ¿por qué este resultado?, dejarles juguetear con el modelo modificando los inputs.
+
+Por tanto, el modelo que usaremos es Red neuronal: input+5neuronas+dropout=0.1+10neuronas+output.
+
+```{r}
+#Vamos a guardarlo todos los entrenamientos a .RDS
+saveRDS(accs_df_gbm, "accs_df_gbm.rds")
+saveRDS(accs_df_rf, "accs_df_rf.rds")
+saveRDS(accs_df_nn, "accs_df_nn.rds")
+
+saveRDS(gbm_grid, "gbm_grid.rds")
+saveRDS(rf_grid, "rf_grid.rds")
+saveRDS(nn_grid, "nn_grid.rds")
+
+saveRDS(Resultados_gbm, "Resultados_gbm.rds")
+saveRDS(Resultados_rf, "Resultados_rf.rds")
+saveRDS(Resultados_nn, "Resultados_nn.rds")
+```
